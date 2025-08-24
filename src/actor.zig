@@ -6,12 +6,12 @@ const Channel = root.Channel;
 /// with the outside world via two channels: an inbox and an outbox. After calling
 /// `spawn()`, the user gets an `ActorHandle` which contains the user-side
 /// endpoints of the channels.
-pub fn Actor(comptime InboxT: type, comptime OutboxT: type) type {
+pub fn Actor(comptime ContextT: type, comptime InboxT: type, comptime OutboxT: type) type {
     return struct {
         const Self = @This();
 
         allocator: std.mem.Allocator,
-        work_fn: *const fn (inbox: Channel(InboxT).Receiver, outbox: Channel(OutboxT).Sender) void,
+        work_fn: *const fn (ctx: ContextT, inbox: Channel(InboxT).Receiver, outbox: Channel(OutboxT).Sender) void,
 
         pub const ActorHandle = struct {
             inbox: Channel(InboxT).Sender,
@@ -28,11 +28,11 @@ pub fn Actor(comptime InboxT: type, comptime OutboxT: type) type {
             }
         };
 
-        pub fn init(allocator: std.mem.Allocator, work_fn: *const fn (inbox: Channel(InboxT).Receiver, outbox: Channel(OutboxT).Sender) void) Self {
+        pub fn init(allocator: std.mem.Allocator, work_fn: *const fn (ctx: ContextT, inbox: Channel(InboxT).Receiver, outbox: Channel(OutboxT).Sender) void) Self {
             return .{ .allocator = allocator, .work_fn = work_fn };
         }
 
-        pub fn spawn(self: *Self, inbox_capacity: usize, outbox_capacity: usize) !ActorHandle {
+        pub fn spawn(self: *Self, ctx: ContextT, inbox_capacity: usize, outbox_capacity: usize) !ActorHandle {
             // Create channels
             const in_pair = try Channel(InboxT).create(self.allocator, inbox_capacity);
             errdefer {
@@ -62,7 +62,7 @@ pub fn Actor(comptime InboxT: type, comptime OutboxT: type) type {
                 out_pair.receiver.deinit();
             }
 
-            const th = try std.Thread.spawn(.{}, workerMain, .{ self.work_fn, worker_inbox, worker_outbox });
+            const th = try std.Thread.spawn(.{}, workerMain, .{ ctx, self.work_fn, worker_inbox, worker_outbox });
 
             return .{
                 .inbox = in_pair.sender, // user sends to actor
@@ -72,11 +72,12 @@ pub fn Actor(comptime InboxT: type, comptime OutboxT: type) type {
         }
 
         fn workerMain(
-            work_fn: *const fn (inbox: Channel(InboxT).Receiver, outbox: Channel(OutboxT).Sender) void,
+            ctx: ContextT,
+            work_fn: *const fn (ctx: ContextT, inbox: Channel(InboxT).Receiver, outbox: Channel(OutboxT).Sender) void,
             inbox: Channel(InboxT).Receiver,
             outbox: Channel(OutboxT).Sender,
         ) void {
-            work_fn(inbox, outbox);
+            work_fn(ctx, inbox, outbox);
             // Signal EOF and drop worker-owned endpoints
             outbox.close();
             outbox.deinit();
@@ -86,10 +87,10 @@ pub fn Actor(comptime InboxT: type, comptime OutboxT: type) type {
 }
 
 test "Actor map/echo: doubles incoming ints and forwards them" {
-    const A = Actor(usize, usize);
+    const A = Actor(void, usize, usize);
 
     const Helpers = struct {
-        pub fn doubler(inbox: Channel(usize).Receiver, outbox: Channel(usize).Sender) void {
+        pub fn doubler(_: void, inbox: Channel(usize).Receiver, outbox: Channel(usize).Sender) void {
             while (inbox.next()) |v| {
                 _ = outbox.send(v * 2) catch unreachable;
             }
@@ -97,7 +98,7 @@ test "Actor map/echo: doubles incoming ints and forwards them" {
     };
 
     var actor = A.init(std.testing.allocator, Helpers.doubler);
-    var h = try actor.spawn(16, 16);
+    var h = try actor.spawn({}, 16, 16);
     defer h.deinit();
 
     // Send 1..=10
@@ -120,10 +121,10 @@ test "Actor map/echo: doubles incoming ints and forwards them" {
 }
 
 test "Actor reduce/sum: consumes ints and emits a single total" {
-    const A = Actor(i32, i32);
+    const A = Actor(void, i32, i32);
 
     const Helpers = struct {
-        pub fn summer(inbox: Channel(i32).Receiver, outbox: Channel(i32).Sender) void {
+        pub fn summer(_: void, inbox: Channel(i32).Receiver, outbox: Channel(i32).Sender) void {
             var total: i32 = 0;
             while (inbox.next()) |r| {
                 total += r;
@@ -133,7 +134,7 @@ test "Actor reduce/sum: consumes ints and emits a single total" {
     };
 
     var actor = A.init(std.testing.allocator, Helpers.summer);
-    var h = try actor.spawn(8, 1);
+    var h = try actor.spawn({}, 8, 1);
     defer h.deinit();
 
     // Send -5..=5 -> sum = 0

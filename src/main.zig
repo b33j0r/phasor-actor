@@ -16,12 +16,12 @@ pub const Result = union(enum) {
     Error: error{ DivisionByZero },
 };
 
-const CalculatorActor = Actor(Command, Result);
+const CalculatorActor = Actor(void, Command, Result);
 
 pub fn main() !u8 {
     const allocator = std.heap.c_allocator;
     var actor = CalculatorActor.init(allocator, calculatorFn);
-    var h = try actor.spawn(16, 16);
+    var h = try actor.spawn({}, 16, 16);
     defer h.deinit();
 
     try h.inbox.send(.{ .Add = .{ .value = 2.5 } });
@@ -43,7 +43,7 @@ pub fn main() !u8 {
     return 0;
 }
 
-fn calculatorFn(inbox: Channel(Command).Receiver, outbox: Channel(Result).Sender) void {
+fn calculatorFn(_: void, inbox: Channel(Command).Receiver, outbox: Channel(Result).Sender) void {
     var total: f32 = 0.0;
     while (inbox.next()) |cmd| {
         switch (cmd) {
