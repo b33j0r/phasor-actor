@@ -1,0 +1,19 @@
+# Zig
+zig-cache/
+.zig-cache/
+zig-out/
+build/
+build-*/
+docgen_tmp/
+.zbscanhelper.zig
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+local/
