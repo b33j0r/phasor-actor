@@ -16,12 +16,12 @@ pub const Result = union(enum) {
     Error: error{ DivisionByZero },
 };
 
-const CalculatorActor = Actor(void, Command, Result);
+const CalculatorActor = Actor(Calculator, Command, Result);
 
 pub fn main() !u8 {
     const allocator = std.heap.c_allocator;
-    var actor = CalculatorActor.init(allocator, calculatorFn);
-    var h = try actor.spawn({}, 16, 16);
+    var actor = CalculatorActor.init(allocator);
+    var h = try actor.spawn(Calculator{}, 16, 16);
     defer h.deinit();
 
     try h.inbox.send(.{ .Add = .{ .value = 2.5 } });
@@ -43,29 +43,31 @@ pub fn main() !u8 {
     return 0;
 }
 
-fn calculatorFn(_: void, inbox: Channel(Command).Receiver, outbox: Channel(Result).Sender) void {
-    var total: f32 = 0.0;
-    while (inbox.next()) |cmd| {
-        switch (cmd) {
-            .Add => |c| total += c.value,
-            .Subtract => |c| total -= c.value,
-            .Multiply => |c| total *= c.value,
-            .Divide => |c| {
-                if (c.value == 0.0) {
-                    _ = outbox.send(.{ .Error =  error.DivisionByZero }) catch |err| {
-                        std.log.err("Failed to send error: {}", .{err});
-                    };
-                    continue;
-                } else {
-                    total /= c.value;
-                }
-            },
+const Calculator = struct {
+    pub fn work(_: *@This(), inbox: Channel(Command).Receiver, outbox: Channel(Result).Sender) void {
+        var total: f32 = 0.0;
+        while (inbox.next()) |cmd| {
+            switch (cmd) {
+                .Add => |c| total += c.value,
+                .Subtract => |c| total -= c.value,
+                .Multiply => |c| total *= c.value,
+                .Divide => |c| {
+                    if (c.value == 0.0) {
+                        _ = outbox.send(.{ .Error =  error.DivisionByZero }) catch |err| {
+                            std.log.err("Failed to send error: {}", .{err});
+                        };
+                        continue;
+                    } else {
+                        total /= c.value;
+                    }
+                },
+            }
+            _ = outbox.send(.{ .Partial = total }) catch |err| {
+                std.log.err("Failed to send partial result: {}", .{err});
+            };
         }
-        _ = outbox.send(.{ .Partial = total }) catch |err| {
-            std.log.err("Failed to send partial result: {}", .{err});
+        _ = outbox.send(.{ .Total = total }) catch |err| {
+            std.log.err("Failed to send total: {}", .{err});
         };
     }
-    _ = outbox.send(.{ .Total = total }) catch |err| {
-        std.log.err("Failed to send total: {}", .{err});
-    };
-}
+};

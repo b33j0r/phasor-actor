@@ -7,11 +7,23 @@ const Channel = root.Channel;
 /// `spawn()`, the user gets an `ActorHandle` which contains the user-side
 /// endpoints of the channels.
 pub fn Actor(comptime ContextT: type, comptime InboxT: type, comptime OutboxT: type) type {
+    // Sanity checks on ContextT
+    if (ContextT == void) {
+        @compileError("ContextT cannot be void, it provides the `work` method");
+    }
+    // Check for a work method on ContextT
+    if (!@hasDecl(ContextT, "work")) {
+        @compileError("ContextT must have a `work` method");
+    }
+    const work_fn = ContextT.work;
+    if (@typeInfo(@TypeOf(work_fn)) != .@"fn") {
+        @compileError("ContextT.work must be a function");
+    }
+
     return struct {
         const Self = @This();
 
         allocator: std.mem.Allocator,
-        work_fn: *const fn (ctx: ContextT, inbox: Channel(InboxT).Receiver, outbox: Channel(OutboxT).Sender) void,
 
         pub const ActorHandle = struct {
             inbox: Channel(InboxT).Sender,
@@ -28,11 +40,21 @@ pub fn Actor(comptime ContextT: type, comptime InboxT: type, comptime OutboxT: t
             }
         };
 
-        pub fn init(allocator: std.mem.Allocator, work_fn: *const fn (ctx: ContextT, inbox: Channel(InboxT).Receiver, outbox: Channel(OutboxT).Sender) void) Self {
-            return .{ .allocator = allocator, .work_fn = work_fn };
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{ .allocator = allocator };
         }
 
-        pub fn spawn(self: *Self, ctx: ContextT, inbox_capacity: usize, outbox_capacity: usize) !ActorHandle {
+        pub fn spawn(self: *Self, ctx_or_ptr: anytype, inbox_capacity: usize, outbox_capacity: usize) !ActorHandle {
+            // ctx must be a pointer to ContextT or a ContextT itself
+            const ctx: *ContextT = ctx_block: switch (@typeInfo(@TypeOf(ctx_or_ptr))) {
+                .pointer => {
+                    break :ctx_block ctx_or_ptr;
+                },
+                .@"struct" => {
+                    break :ctx_block @constCast(&ctx_or_ptr);
+                },
+                else => @compileError("ctx must be a pointer to ContextT or a ContextT itself"),
+            };
             // Create channels
             const in_pair = try Channel(InboxT).create(self.allocator, inbox_capacity);
             errdefer {
@@ -62,7 +84,7 @@ pub fn Actor(comptime ContextT: type, comptime InboxT: type, comptime OutboxT: t
                 out_pair.receiver.deinit();
             }
 
-            const th = try std.Thread.spawn(.{}, workerMain, .{ ctx, self.work_fn, worker_inbox, worker_outbox });
+            const th = try std.Thread.spawn(.{}, workerMain, .{ ctx, worker_inbox, worker_outbox });
 
             return .{
                 .inbox = in_pair.sender, // user sends to actor
@@ -72,12 +94,11 @@ pub fn Actor(comptime ContextT: type, comptime InboxT: type, comptime OutboxT: t
         }
 
         fn workerMain(
-            ctx: ContextT,
-            work_fn: *const fn (ctx: ContextT, inbox: Channel(InboxT).Receiver, outbox: Channel(OutboxT).Sender) void,
+            ctx: *ContextT,
             inbox: Channel(InboxT).Receiver,
             outbox: Channel(OutboxT).Sender,
         ) void {
-            work_fn(ctx, inbox, outbox);
+            ctx.work(inbox, outbox);
             // Signal EOF and drop worker-owned endpoints
             outbox.close();
             outbox.deinit();
@@ -87,18 +108,19 @@ pub fn Actor(comptime ContextT: type, comptime InboxT: type, comptime OutboxT: t
 }
 
 test "Actor map/echo: doubles incoming ints and forwards them" {
-    const A = Actor(void, usize, usize);
 
-    const Helpers = struct {
-        pub fn doubler(_: void, inbox: Channel(usize).Receiver, outbox: Channel(usize).Sender) void {
+    const Doubler = struct {
+        pub fn work(_: *@This(), inbox: Channel(usize).Receiver, outbox: Channel(usize).Sender) void {
             while (inbox.next()) |v| {
                 _ = outbox.send(v * 2) catch unreachable;
             }
         }
     };
+    const DoublerActor = Actor(Doubler, usize, usize);
 
-    var actor = A.init(std.testing.allocator, Helpers.doubler);
-    var h = try actor.spawn({}, 16, 16);
+    var actor = DoublerActor.init(std.testing.allocator);
+    var impl = Doubler{};
+    var h = try actor.spawn(&impl, 16, 16);
     defer h.deinit();
 
     // Send 1..=10
@@ -121,10 +143,8 @@ test "Actor map/echo: doubles incoming ints and forwards them" {
 }
 
 test "Actor reduce/sum: consumes ints and emits a single total" {
-    const A = Actor(void, i32, i32);
-
-    const Helpers = struct {
-        pub fn summer(_: void, inbox: Channel(i32).Receiver, outbox: Channel(i32).Sender) void {
+    const Summer = struct {
+        pub fn work(_: *@This(), inbox: Channel(i32).Receiver, outbox: Channel(i32).Sender) void {
             var total: i32 = 0;
             while (inbox.next()) |r| {
                 total += r;
@@ -133,8 +153,11 @@ test "Actor reduce/sum: consumes ints and emits a single total" {
         }
     };
 
-    var actor = A.init(std.testing.allocator, Helpers.summer);
-    var h = try actor.spawn({}, 8, 1);
+    const A = Actor(Summer, i32, i32);
+
+    var actor = A.init(std.testing.allocator);
+    var impl = Summer{};
+    var h = try actor.spawn(&impl, 8, 1);
     defer h.deinit();
 
     // Send -5..=5 -> sum = 0
